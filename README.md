@@ -1,3 +1,9 @@
+# Note:
+
+These results are expected purely because of architectural differences: ODE_ECS uses a relational database-like approach (with tables for components and views), while moecs uses an archetype approach.
+
+All tests were generated automatically by Claude AI, and the conclusions below were also made by the AI without any human intervention.
+
 # Extended benchmark results: ODE_ECS vs moecs
 
 Same machine, `-o:aggressive`, same tracking-allocator harness (`mem.Tracking_Allocator`,
