@@ -4,7 +4,7 @@ These results are expected purely because of architectural differences: ODE_ECS 
 
 All tests were generated automatically by Claude AI, and the conclusions below were also made by the AI without any human intervention.
 
-# Extended benchmark results: ODE_ECS vs moecs
+# Extended benchmark results: ODE_ECS vs moecs (as of 6/30/2026)
 
 Same machine, `-o:aggressive`, same tracking-allocator harness (`mem.Tracking_Allocator`,
 `current_memory_allocated` after setup). Each library uses its idiomatic fast path:
