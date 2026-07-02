@@ -9,7 +9,6 @@ ODE_ECS link: [https://github.com/odin-engine/ode_ecs](https://github.com/odin-e
 moecs link: [https://github.com/helioscout/moecs](https://github.com/helioscout/moecs)
 
 # Benchmark results: ODE_ECS vs moecs (as of 7/2/2026)
-=======
 
 Same machine, `-o:aggressive`, same tracking-allocator harness (`mem.Tracking_Allocator`,
 `current_memory_allocated` after setup). moecs refetched from
