@@ -8,7 +8,7 @@ ODE_ECS link: [https://github.com/odin-engine/ode_ecs](https://github.com/odin-e
 
 moecs link: [https://github.com/helioscout/moecs](https://github.com/helioscout/moecs)
 
-# Benchmark results: ODE_ECS vs moecs (as of 7/2/2026)
+# Benchmark results: ODE_ECS vs moecs (as of 7/5/2026)
 
 Same machine, `-o:aggressive`, same tracking-allocator harness (`mem.Tracking_Allocator`,
 `current_memory_allocated` after setup). moecs refetched from
@@ -24,7 +24,8 @@ components directly from the tables' dense arrays instead of going through the v
 pointer records, falling back transparently otherwise. `view_dense_slice` additionally exposes
 raw component slices in view-row order, which compiles to a pure SoA sweep. On this machine a
 plain `pos[i] += vel[i]` loop over two raw arrays runs at 0.30 ns/ent/frame — the batch path
-hits exactly that hardware floor.
+runs at that hardware floor. This run also picks up ODE_ECS's 7/4/2026 changes (micro
+optimizations and the deferred tail-swap feature, commit `59e134d`).
 
 Benchmark sources live under `G:\odin\ecs_bench\`:
 `ode_one`, `moecs_one` (scenario 0); `ode`, `ode_batch`, `moecs_bench` (scenario 1);
@@ -39,11 +40,11 @@ iteration with no multi-component lookup at all — ODE_ECS iterates the `Table`
 
 | Library | setup | iter/frame | ns/ent/frame | live mem |
 |---------|-------|------------|--------------|----------|
-| ODE_ECS (table)      | 13.7 ms | 0.31 ms | **0.31** | **83 MB** |
-| ODE_ECS (view+iter)  | —       | 0.29 ms | **0.29** | —         |
-| moecs                | 695 ms  | 3.25 ms | 3.25     | 168 MB    |
+| ODE_ECS (table)      | 15.4 ms | 0.32 ms | **0.32** | **83 MB** |
+| ODE_ECS (view+iter)  | —       | 0.30 ms | **0.30** | —         |
+| moecs                | 738 ms  | 3.89 ms | 3.89     | 168 MB    |
 
-ODE_ECS iterates a single component ~10x faster and its `View`+`Iterator` costs *nothing*
+ODE_ECS iterates a single component ~12x faster and its `View`+`Iterator` costs *nothing*
 over raw table iteration here (the dense fast path reduces it to the same SoA sweep; both
 sit at the 16-bytes-read+written-per-entity memory floor). moecs pays per-entity `get_mut`
 (typeid lookup + chunk indexing) plus per-frame system dispatch even in the simplest
@@ -55,12 +56,12 @@ Each entity has `Position{x,y:f64}` + `Velocity{x,y:f64}`; per frame `pos += vel
 
 | Library | setup | iter/frame | ns/ent/frame | live mem |
 |---------|-------|------------|--------------|----------|
-| ODE_ECS (iterator)          | 20.4 ms | 0.58 ms | **0.58** | 122 MB |
-| ODE_ECS (`view_dense_slice`)| 20.4 ms | 0.30 ms | **0.30** | 122 MB |
-| moecs                       | 718 ms  | 4.23 ms | 4.23     | 184 MB |
+| ODE_ECS (iterator)          | 22.1 ms | 0.61 ms | **0.61** | 122 MB |
+| ODE_ECS (`view_dense_slice`)| 21.6 ms | 0.31 ms | **0.31** | 122 MB |
+| moecs                       | 769 ms  | 4.92 ms | 4.92     | 184 MB |
 
-ODE_ECS: ~35x faster setup, ~7x faster iteration with the unchanged `Iterator` API and
-~14x with the batch API (which runs at the measured raw-SoA hardware floor), ~1.5x leaner.
+ODE_ECS: ~35x faster setup, ~8x faster iteration with the unchanged `Iterator` API and
+~16x with the batch API (which runs at the measured raw-SoA hardware floor), ~1.5x leaner.
 
 ## Scenario 2 — Many component types: 32 types, all on every entity (250k entities, 100 frames)
 
@@ -69,35 +70,35 @@ only 2 of them.
 
 | Library | setup | iter/frame | ns/ent/frame | live mem |
 |---------|-------|------------|--------------|----------|
-| ODE_ECS | 83 ms  | 0.15 ms | **0.60** | 259 MB    |
-| moecs   | 100 ms | 1.78 ms | 7.10     | **160 MB**|
+| ODE_ECS | 94 ms  | 0.16 ms | **0.62** | 259 MB    |
+| moecs   | 110 ms | 2.05 ms | 8.18     | **160 MB**|
 
 ## Scenario 3 — Structural churn: 10% despawn+respawn/frame + movement (100k entities, 100 frames)
 
 | Library | total | ms/frame | ns per churn-op | last-entity x |
 |---------|-------|----------|-----------------|---------------|
-| ODE_ECS (iterator) | 48 ms  | 0.48     | **24.1** | 10 |
-| ODE_ECS (batch)    | 45 ms  | **0.45** | **22.3** | 10 |
-| moecs              | 113 ms | 1.13     | 57       | 9  |
+| ODE_ECS (iterator) | 52 ms  | 0.52     | **25.7** | 10 |
+| ODE_ECS (batch)    | 49 ms  | **0.49** | **24.6** | 10 |
+| moecs              | 125 ms | 1.25     | 62       | 9  |
 
 # What the scenarios reveal
 
 **1. ODE_ECS iteration is flat vs component-type count; moecs degrades.** From 1 -> 2 -> 32
 registered component types, ODE_ECS's per-entity cost through the same-API iterator moves
-0.29 -> 0.58 -> 0.60 ns (the 1->2 step is just the extra Velocity stream; 2->32 is flat) — its
+0.30 -> 0.61 -> 0.62 ns (the 1->2 step is just the extra Velocity stream; 2->32 is flat) — its
 SoA layout means iterating `{Position, Velocity}` only ever touches those two dense arrays no
-matter how many other component types exist. moecs goes 3.25 -> 4.23 -> 7.10 ns, a ~68% slowdown
+matter how many other component types exist. moecs goes 3.89 -> 4.92 -> 8.18 ns, a ~66% slowdown
 from 2 to 32 types, because (a) each `get_mut` strides into a now-512-byte AoS chunk, so the two
 fields you want share cache lines with 30 unused components, and (b) the `component_index`
-typeid scan (`component.odin:38`) is now over 32 entries. The gap widens from ~7x to ~12x
+typeid scan (`component.odin:38`) is now over 32 entries. The gap widens from ~8x to ~13x
 exactly as the architecture predicts as a game grows more component types.
 
 **2. The dense fast path makes View overhead disappear.** Before this optimization, ODE_ECS's
 `Iterator` walked per-row records of `{entity_id, component pointers}` (~24 extra bytes streamed
 per entity per frame). Now, whenever the view is dense-aligned — the common case, verified
 incrementally with O(tables) work per structural change and a lazy early-abort rescan — the
-iterator reads `table.rows[i]` directly. Scenario 0 shows the result: view iteration (0.29 ns)
-is indistinguishable from raw table iteration (0.31 ns). `view_dense_slice` goes one step
+iterator reads `table.rows[i]` directly. Scenario 0 shows the result: view iteration (0.30 ns)
+is indistinguishable from raw table iteration (0.32 ns). `view_dense_slice` goes one step
 further and hands the user the raw slices in view-row order; a plain loop over them is exactly
 the 0.30 ns raw-SoA floor measured outside any ECS. When alignment genuinely breaks (e.g.
 removing one component from an entity that keeps others), everything transparently falls back
@@ -116,8 +117,8 @@ when they're sparse. In scenarios 0 and 1 ODE_ECS is 1.5-2x leaner outright.
 
 **4. Churn: ODE_ECS is ~2.4x faster even though this is moecs's design-for case.** moecs's
 deferred-mutation model exists to make structural changes *safe* during iteration, not
-necessarily *fast*. ODE_ECS's immediate tail-swap costs ~24 ns per despawn/respawn op vs
-moecs's ~57 ns (deferred queue + `perform()` rebuild + per-frame `slice.filter` over
+necessarily *fast*. ODE_ECS's immediate tail-swap costs ~26 ns per despawn/respawn op vs
+moecs's ~62 ns (deferred queue + `perform()` rebuild + per-frame `slice.filter` over
 archetypes, `world.odin:755`). Notably, the dense fast path *survives* this churn: tables with
 identical membership perform identical tail-swaps and stay row-aligned, so the batch variant
 (`ode_churn_batch`) still runs the movement pass as a raw SoA sweep, re-verifying alignment
@@ -129,7 +130,7 @@ moecs; in ODE_ECS you must follow the "don't mutate while iterating" rule).
 
 # Overall
 
-Across all four workloads, ODE_ECS iterates 7-12x faster (10x even in the trivial one-component
+Across all four workloads, ODE_ECS iterates 8-13x faster (12x even in the trivial one-component
 case), sets up ~35-50x faster, and churns ~2.4x faster, with the iteration lead growing as
 component-type count rises — the structural payoff of SoA + zero-lookup typed tables +
 incrementally-maintained views, now with a dense fast path that removes the view indirection
@@ -145,7 +146,9 @@ costs are the price of those features.
 
 - One machine, one run set (medians of 3); absolute numbers vary, but the ratios track the
   architectural differences and were stable across repeated runs.
-- moecs is the latest upstream commit (`8d50786`) as of 7/2/2026, re-pulled for this run.
+- moecs is the latest upstream commit (`8d50786`) as of 7/5/2026, re-pulled for this run
+  (unchanged since the 7/2 run; its slightly higher absolute numbers this time are machine
+  variance). ODE_ECS is its latest upstream commit `59e134d` (7/5/2026).
 - All workloads verified correct via a checksum (`x` value) that also defeats dead-code
   elimination. (`ode_one` reports x=400 because it runs the same 100 frames twice — once
   through the table, once through the view; `moecs_one` runs them once, x=200.)
