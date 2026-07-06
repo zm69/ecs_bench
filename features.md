@@ -29,7 +29,7 @@ feature set (systems, observers, relations, resources). For measured performance
 | Structural changes | Immediate (tail-swap, O(1)) | Deferred to end of progress step (`perform` stage) |
 | Mutation while iterating | Manual rule ("don't mutate while iterating") or `pause_tail_swap` / `resume_tail_swap` / `pack` deferred mode | Safe by design — despawns and archetype moves are deferred automatically |
 | Observers / events | None | 9 event types (SPAWNED, DESPAWNED, ADDED, REMOVED, SET, TAGGED, UNTAGGED, RELATED, UNRELATED), per-type on/off |
-| Entity relations | None | One-to-one and one-to-many, with relationship data; built-in `ChildOf` / `ParentOf` / `RelationOf`, cascade despawn of orphaned children |
+| Entity relations | Parent/child via `Relations_Table` (one parent per child): O(1) set/remove/reparent, always-on cycle check, orphan-on-destroy or cascading `destroy_children` | One-to-one and one-to-many, with relationship data; built-in `ChildOf` / `ParentOf` / `RelationOf`, multi-parent, cascade despawn of orphaned children |
 | Resources (singletons) | None (use plain Odin globals/structs) | First-class registered resources with `set` / `get` / `get_mut` |
 | Entity lifetimes | One kind | `DYNAMIC` and `STATIC` (never-despawned) entities in separate blocks |
 | Parallelism support | Designed-in batching: `iterator_init(start_row, end_row)`; one `Database` per thread; phase-separation guidance | Not addressed; deferred model implies single-threaded `progress()` |
@@ -51,6 +51,8 @@ feature set (systems, observers, relations, resources). For measured performance
   mid-iteration, then `pack` the holes away.
 - **Explicit parallelism hooks:** ranged iterators for data-parallel batches and share-nothing
   multiple databases.
+- **Cycle-safe relations:** `set_parent` always rejects cycles (`Relation_Cycle`), so cascade
+  destroy can never recurse forever; moecs performs no cycle check when relating entities.
 
 ## What only moecs has
 
@@ -58,8 +60,9 @@ feature set (systems, observers, relations, resources). For measured performance
   execution, task systems (no query).
 - **Query language:** match on components + tags + relations with a `without` exclusion list.
 - **Observers:** subscribe to structural, tag, data, and relation events per type.
-- **Entity relations:** typed one-to-one / one-to-many links with attached data, built-in
-  parent/child semantics and automatic cleanup on despawn.
+- **Typed relations with attached data:** user-defined relation types carrying relationship
+  data, multi-parent links, and the `RelationOf` reverse index. (ODE_ECS's `Relations_Table`
+  covers parent/child only — one parent per child, no attached data.)
 - **Resources:** registered singletons with typed accessors.
 - **Deferred-safety programming model:** despawn or re-archetype freely inside system code;
   changes apply at the end of the frame.
@@ -69,10 +72,11 @@ feature set (systems, observers, relations, resources). For measured performance
 
 ## Bottom line
 
-ODE_ECS is a lean iteration engine: fewer concepts (database, table, view), immediate O(1)
-structural changes, zero hidden allocations, and the fastest iteration paths — you bring your
-own systems, events, and relations. moecs is a framework: scheduler, queries, observers,
-relations, and resources out of the box, paid for with deferred structural changes and
+ODE_ECS is a lean iteration engine: fewer concepts (database, table, view, relations),
+immediate O(1) structural changes, zero hidden allocations, and the fastest iteration paths —
+you bring your own systems and events, and its relations are deliberately minimal
+(parent/child). moecs is a framework: scheduler, queries, observers, typed relations,
+and resources out of the box, paid for with deferred structural changes and
 per-entity chunk storage that iterates slower (see the benchmarks). Pick ODE_ECS when raw
 throughput and memory predictability dominate; pick moecs when you want the feature set and
 its deferred-safety model.
