@@ -12,7 +12,7 @@ odecs link: [https://github.com/NateTheGreatt/odecs](https://github.com/NateTheG
 
 Features comparison is here: [features.md](https://github.com/zm69/ecs_bench/blob/main/features.md)
 
-# Benchmark results: ODE_ECS vs moecs vs odecs (as of 7/9/2026)
+# Benchmark results: ODE_ECS vs moecs vs odecs (as of July 9, 2026)
 
 Same machine, `-o:aggressive`, same tracking-allocator harness (`mem.Tracking_Allocator`,
 `current_memory_allocated` after setup). moecs re-fetched from
