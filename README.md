@@ -56,7 +56,9 @@ Benchmark sources live under `G:\odin\ecs_bench\`:
 `moecs_bench`, `odecs_bench` (scenario 1); `ode_many`, `ode_many_group`, `moecs_many`,
 `odecs_many` (scenario 2); `ode_churn`, `ode_churn_batch`, `ode_churn_group`, `moecs_churn`,
 `odecs_churn` (scenario 3); `ode_relations`, `moecs_relations`, `odecs_relations`
-(scenario 4). All numbers are medians of 3 runs, all binaries alternating within each pass.
+(scenario 4); `ode_mixed`, `ode_mixed_group`, `moecs_mixed`, `odecs_mixed`, plus the shared
+`scenario5_gen` schedule generator (scenario 5). All numbers are medians of 3 runs, all
+binaries alternating within each pass.
 
 ## Scenario 0 — Single component: pure table iteration (1M entities, 100 frames)
 
@@ -231,6 +233,56 @@ but supports only single-parent parent/child, while moecs and odecs support mult
 typed relations with data (odecs additionally gets relational *queries* — "all children of X"
 composes with any other term). In this run all five scenarios were measured back-to-back in
 a single session, all three libraries alternating within each pass.
+
+## Scenario 5 — Random mixed-component churn: 5 component sizes, sparse membership (100k entities, added 7/24/2026)
+
+Five component types with deliberately uneven sizes — `C0` 32B, `C1` 64B, `C2` 196B, `C3` 386B,
+`C4` 500B — instead of the uniform 16-byte structs every earlier scenario uses. 100k entities
+are created, each independently getting a random 1-5 of the 5 types (not a fixed combination);
+10k random entities then get one random missing component added, 10k random entities get 1-5
+random components removed (a no-op per component they didn't have), and 10k random entities
+are destroyed. The final benchmark queries entities that have *at least* `C2`, `C3`, `C4`
+(24,917 of the 90k survivors match) and runs a 3-component combine (`C3 += C2; C3 += C4`) for
+100 frames. This is the first scenario with genuinely heterogeneous per-entity membership and
+the first random (rather than hand-arranged) workload in this repo — fairness across the four
+programs (ODE_ECS View, ODE_ECS Group, moecs, odecs) is structural, not incidental: all four
+import a shared `scenario5_gen` package that precomputes the entire schedule (every entity's
+starting components, every add/remove/destroy target) once from a fixed seed, so every program
+executes byte-identical work. All four report the same `x=317613314` checksum, confirming it.
+
+| Library | setup | add ns/op | remove ns/op | destroy (10k) | iter/frame | ns/ent/frame | matched | live mem |
+|---------|-------|-----------|--------------|---------------|------------|--------------|---------|----------|
+| ODE_ECS (view)  | **5.0 ms** | 31.0    | 108.9   | 1.96 ms | 9.2 ms  | 3.71     | 24,917 | 124 MB    |
+| ODE_ECS (group) | 5.7 ms     | 47.7    | 150.5   | 2.13 ms | **3.8 ms** | **1.51** | 24,917 | **121 MB** |
+| moecs           | 25.5 ms    | 53.8    | **75.0**| **0.29 ms** | 28.8 ms | 11.56 | 24,917 | 128 MB    |
+| odecs           | 2,587.5 ms | 9,893.8 | 406.7   | 2.27 ms | 4.1 ms  | 1.65     | 24,917 | **72 MB**  |
+
+The headline number is odecs's add-phase: 9.9 *microseconds* per op, ~185-320x the other three
+variants (31.0-53.8 ns).
+Scenario 5 is the first workload where a single structural change can migrate an entity across
+components as large as 500 bytes — every `add_component`/`remove_component` in odecs is an
+archetype move (copy every existing component the entity has, up to ~1.2 KB worst case, into a
+newly-indexed archetype table), and unlike scenarios 0-3's uniform 16-byte payloads, that copy
+cost now scales with the actual component sizes involved. Its setup cost (2.6 s for 100k
+entities) is proportionally the worst this repo has measured, consistent with the same cause:
+every entity's initial 1-5 components are added one at a time, each a fresh archetype move.
+ODE_ECS and moecs don't pay this because neither relocates existing component data on a
+structural change — ODE_ECS's `Table`s are independent per-type arrays (an add/remove is one
+row in the affected table only) and moecs's per-entity chunk already reserves room for every
+registered component regardless of which are populated.
+
+ODE_ECS's `View` vs `Group` trade-off reproduces exactly as scenarios 1-3 predict, just sharper:
+`Group` costs ~1.5x more per add and ~1.4x more per remove (every membership-affecting
+mutation now pays a swap across three tables whose rows are up to 500 bytes each, not the
+16-byte payloads of earlier scenarios), but iterates ~2.5x faster (1.51 vs 3.71 ns/ent/frame)
+since `group_dense_slice` never re-verifies alignment — this is the first scenario where the
+`Group`'s owned set is a genuine minority of a randomly-membershipped population rather than
+"every entity, always," and the trade still holds. moecs sits in the middle on structural ops
+(53.8 / 75.0 ns, cheaper than ODE_ECS's Group and pricier than its View — its deferred
+`perform()` rebuild doesn't care about payload size the way an immediate archetype-copying
+move does) but its iteration cost (11.56 ns/ent/frame) is the highest of the three, in line
+with scenario 2's finding that its AoS chunk layout degrades as registered-but-unused component
+types accumulate around the ones actually read.
 
 # What the scenarios reveal
 
