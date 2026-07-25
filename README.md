@@ -86,27 +86,48 @@ All numbers are medians of 3 runs, all binaries alternating within each pass.
 ## Scenario 0 — Single component: pure table iteration (1M entities, 100 frames)
 
 Each entity has one `Position{x,y:f64}`; per frame `pos.x += pos.y`. This isolates raw
-iteration with no multi-component lookup at all — ODE_ECS iterates the `Table` directly
-(`for &p in positions.rows`), moecs runs a one-component archetype system, odecs sweeps its
-single archetype's `Position` column via `get_table`. No `Arch_Table` variant: an archetype
-with one column is the same layout as a plain `Table`.
+iteration with no multi-component lookup at all — ODE_ECS iterates the `Table` directly via
+`ecs.table_dense_slice(&positions)` (see fix note below), moecs runs a one-component archetype
+system, odecs sweeps its single archetype's `Position` column via `get_table`. No `Arch_Table`
+variant: an archetype with one column is the same layout as a plain `Table`.
 
 | Library | setup | iter/frame | ns/ent/frame | live mem |
 |---------|-------|------------|--------------|----------|
-| ODE_ECS (table)      | **14.8 ms** | 0.31 ms | 0.31     | 76 MB     |
-| ODE_ECS (view+iter)  | —           | **0.28 ms** | **0.28** | —     |
+| ODE_ECS (table)      | **14.9 ms** | **0.22 ms** | **0.22** | 76 MB     |
+| ODE_ECS (view+iter)  | —           | 0.28 ms | 0.28     | —     |
 | moecs                | 699.3 ms    | 3.17 ms | 3.17     | 168 MB    |
 | odecs                | 3,372.9 ms  | 0.23 ms | 0.23     | **51 MB** |
 
-ODE_ECS iterates a single component ~10x faster than moecs and its `View`+`Iterator` costs
-*nothing* over raw table iteration (the dense fast path reduces it to the same SoA sweep).
-moecs pays per-entity `get_mut` (typeid lookup + chunk indexing) plus per-frame system dispatch
-even in the simplest possible case. odecs's `View`-equivalent query loop edges out ODE_ECS's
-raw table iteration this session (0.23 vs 0.31 ns) while both remain at the same
-read+write-16-bytes-per-entity memory floor; odecs keeps the leanest footprint (51 MB). The
-catch is the other column: odecs takes 3.4 *seconds* to create 1M entities (~228x ODE_ECS,
-~4.8x moecs) — every `add_entity` funnels components through a variadic `..any` path with
-per-call temp-allocator bookkeeping and typeid→ComponentID map lookups.
+**Fix landed this session: raw `Table` iteration is now the fastest single-component path,
+not the slowest.** An earlier pass of this README (same day) measured ODE_ECS's raw `Table`
+iteration at 0.31 ns/ent/frame — *slower* than both its own `View`+`Iterator` (0.28 ns) and
+odecs (0.23 ns), which was surprising enough to investigate. The cause turned out to be a real,
+reproducible compiler-codegen issue, not noise (confirmed 20/20 across repeated passes): the
+benchmark's loop read `positions.rows` — a **field access on a live struct** — directly inside
+`for &p in positions.rows { p.x += p.y }`. The optimizer cannot prove a write through the
+loop's element pointer `&p` doesn't alias `positions` itself, so it conservatively reloads the
+`rows` slice pointer from the `Table` struct after *every* store, verified directly in the
+compiled assembly (`-build-mode:asm`): a redundant `movq <offset>(%rcx), %r11` before each of
+the loop's two unrolled elements, on every iteration. odecs's equivalent loop iterates a local
+slice variable returned by `get_table` (not a field access), so LLVM keeps the pointer in a
+register for the whole loop — no reload, no aliasing ambiguity. The library now exposes
+`table__dense_slice`/`ecs.table_dense_slice` (mirroring `view_dense_slice`/`group_dense_slice`/
+`arch_table__dense_slice` for the other three table types) — it returns `rows` by value from a
+call, giving the caller a fresh local slice with no aliasing back to the `Table`, which is
+enough on its own (even `#force_inline`d) to eliminate the reload. `ode_one`'s hot loop was
+updated to use it; the fix requires no user-facing behavior change, only 12 new lines of
+library code (`table.odin`/`ecs.odin`), and all 182 existing library tests still pass. Verified
+with a 20-pass A/B before landing the fix (20/20 odecs-faster) and a 10-pass rerun after
+(ODE_ECS table median 0.220 ns vs odecs's noisier-this-run 0.245 ns median, 0.22-0.42 range).
+
+ODE_ECS now iterates a single component ~14x faster than moecs (previously ~10x) and ties or
+slightly beats odecs outright, while both remain at the same read+write-16-bytes-per-entity
+memory floor; odecs keeps the leanest footprint (51 MB). moecs pays per-entity `get_mut`
+(typeid lookup + chunk indexing) plus per-frame system dispatch even in the simplest possible
+case. The catch on odecs's side is the other column: it takes 3.4 *seconds* to create 1M
+entities (~226x ODE_ECS, ~4.8x moecs) — every `add_entity` funnels components through a
+variadic `..any` path with per-call temp-allocator bookkeeping and typeid→ComponentID map
+lookups.
 
 ## Scenario 1 — Movement, 2 component types (1M entities, 100 frames)
 
@@ -282,11 +303,13 @@ component as a separate column. moecs goes 3.17 -> 4.19 -> 7.07 ns, a ~69% slowd
 `component_index` typeid scan grows with registered-type count.
 
 **2. Two ways to make View/Group overhead disappear: detect it away, or never let it exist.**
-The dense-view fast path (7/2/2026) makes a `View`'s per-row pointer bookkeeping vanish
-*when* alignment happens to hold — scenario 0 shows view iteration (0.28 ns) edging out raw
-table iteration (0.31 ns). A `Group` goes further: it *enforces* alignment so there's nothing
-to detect, dense or otherwise. `Arch_Table` goes further still: there is no separate index to
-align in the first place, because both columns already share one. The three sit in a strict
+The dense-view fast path (7/2/2026) makes a `View`'s per-row pointer bookkeeping vanish *when*
+alignment happens to hold, closing most of the gap to a raw sweep — scenario 0's `View`+
+`Iterator` path (0.28 ns) sits close to raw `Table` iteration (0.22 ns; see the fix note above
+for why that number, not the codegen quirk it used to carry, is the real floor). A `Group` goes
+further: it *enforces* alignment so there's nothing to detect, dense or otherwise. `Arch_Table`
+goes further still: there is no separate index to align in the first place, because both
+columns already share one. The three sit in a strict
 cost hierarchy on every axis measured here (scenario 1: iteration 0.59 -> 0.30 -> 0.31 -> 0.29
 ns; memory 103 -> 103 -> 83 -> 72 MB) — not because later designs try harder, but because each
 one removes an entire category of bookkeeping the previous one still had to maintain: `View`
@@ -369,13 +392,22 @@ or `Group` for anything with independent per-component add/remove churn; and mix
 - One machine, one run set (medians of 3 passes, all 27 binaries alternating within each
   pass in a single session); absolute numbers vary between sessions, but the ratios track
   the architectural differences and were stable across repeated runs.
-- ODE_ECS moved from commit `5c5671c` to `df5a975` (four commits: `ca30d76` "Add Arch_Table,
-  improve API" — the substantive change, adding `arch_table.odin`/`arch_iterator.odin` and the
-  Group/Command_Buffer/serialization integration for it — followed by three comment/formatting/
-  text-only commits). moecs (`ccd00f2`) and odecs (`e3ca0a5`) were checked and are unchanged
-  upstream since the previous run; their binaries were reused as-is (not rebuilt) but rerun
-  fresh this session, same as ODE_ECS's, so every number in every table above comes from this
-  session's own back-to-back run.
+- ODE_ECS moved from commit `5c5671c` to `df5a975` for the Arch_Table work (four commits:
+  `ca30d76` "Add Arch_Table, improve API" — the substantive change, adding
+  `arch_table.odin`/`arch_iterator.odin` and the Group/Command_Buffer/serialization integration
+  for it — followed by three comment/formatting/text-only commits), then to `acfe11c` "Add
+  table__dense_slice / ecs.table_dense_slice" for the scenario-0 codegen fix documented above,
+  found and fixed later the same session. moecs (`ccd00f2`) and odecs (`e3ca0a5`) were checked
+  and are unchanged upstream since the previous run; their binaries were reused as-is (not
+  rebuilt) but rerun fresh this session, same as ODE_ECS's, so every number in every table above
+  comes from this session's own back-to-back run.
+- The scenario-0 investigation (see that section) was verified with real tooling, not just
+  reasoning: `odin build -build-mode:asm` to inspect the actual compiled loop, a 20-pass A/B
+  before concluding it wasn't noise (0/20 for ODE_ECS's raw `Table` path vs odecs), and a
+  from-scratch isolated reproduction (a standalone `#force_no_inline` procedure with a local
+  slice variable) that confirmed the fix before it was implemented as a real library API. The
+  fix is purely additive — no existing API's behavior changed, and `ode_ecs/docs/tables.md`'s
+  iteration example was updated to use it.
 - Three new binaries this run: `ode_arch` (scenario 1), `ode_many_arch` (scenario 2, the
   `Arch_Table`+`Table` mix), `ode_churn_arch` (scenario 3) — all under `G:\odin\ecs_bench\`,
   built the same way as every other binary here (`odin build <dir> -out:<dir>/<name>.exe
