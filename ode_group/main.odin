@@ -47,8 +47,8 @@ main :: proc() {
     time.stopwatch_reset(&sw)
     time.stopwatch_start(&sw)
     for f in 0..<FRAMES {
-        pos := ecs.group_dense_slice(&movers, &positions)
-        vel := ecs.group_dense_slice(&movers, &velocities)
+        pos := ecs.dense_slice(&movers, &positions)
+        vel := ecs.dense_slice(&movers, &velocities)
         for i in 0..<len(pos) {
             pos[i].x += vel[i].x
             pos[i].y += vel[i].y

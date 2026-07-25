@@ -38,7 +38,7 @@ doc: `Group`, `Command_Buffer`, `Relations_Table`, `Overbase`, binary serializat
 | Memory-lean table variants | `Compact_Table`, `Tiny_Table` for sparse component types (both support pause/resume packing like `Table`) | — (one chunk layout; sparse entities still reserve full chunk row) |
 | Tags | `Tag_Table` (dense entity list, composable into views; supports pause/resume packing) | Bit-flag tags — set/unset is just a bit write, no storage |
 | Queries | `View` over N tables (`excludes` list for structural negation, optional `filter` proc, `refilter()`/`rebuild()`), incrementally maintained on add/remove; `Group` for a fixed owned-table set with enforced alignment | System match queries: components + tags + relations, plus `without` exclusion |
-| Iteration API | Direct table loop, `Iterator` over views (automatic dense fast path, `for v1, v2 in ecs.iterate(&it, &t1, &t2)` sugar), `view_dense_slice`/`group_dense_slice` raw-SoA batch APIs | System callbacks driven by `progress()`; `each()` for all entities |
+| Iteration API | Direct table loop, `Iterator` over views (automatic dense fast path, `for v1, v2 in ecs.iterate(&it, &t1, &t2)` sugar), `dense_slice` raw-SoA batch APIs | System callbacks driven by `progress()`; `each()` for all entities |
 | Systems / scheduler | None — you write plain loops and call them yourself | Built-in: `mount` with phases (START / PRE_UPDATE / UPDATE / POST_UPDATE / MANUAL), named systems, `enable` / `disable` / `execute` |
 | Structural changes | Immediate (tail-swap, O(1)) by default; opt into deferred via `pause_packing`/`Command_Buffer` (below) | Deferred to end of progress step (`perform` stage) |
 | Mutation while iterating | Three opt-in mechanisms: manual rule ("don't mutate while iterating"); `pause_packing`/`resume_packing`/`pack`, scoped to a `Database`, `Table`, or `Group`; or a `Command_Buffer` that records `destroy_entity`/add/remove-component/tag/`set_parent` and applies them later with `replay` (also composes with `pause_packing`) | Safe by design and always-on — despawns and archetype moves are deferred automatically, no opt-in needed |
@@ -57,7 +57,7 @@ doc: `Group`, `Command_Buffer`, `Relations_Table`, `Overbase`, binary serializat
   allocator; nothing allocates, frees, or moves during the game loop.
 - **Generational entity IDs** — a saved `entity_id` can be safely checked for staleness
   after the slot is reused.
-- **Dense fast path + `view_dense_slice`:** when view rows align with table rows (the common
+- **Dense fast path + `dense_slice`:** when view rows align with table rows (the common
   case), iteration reads dense arrays directly and the batch API compiles to a raw SoA sweep
   at the hardware memory floor.
 - **`Group`:** exclusive ownership of a fixed set of tables that *enforces* (not just detects)
@@ -140,7 +140,7 @@ and observers.
 | Tags | `Tag_Table` (dense entity list, composable into views) | Zero-sized tag structs — a tag is just a component type with no fields, stored as its own archetype-defining bit like any other component |
 | Component enable/disable | None — use `remove_component`/`add_component` (structural) | `disable_component`/`enable_component`/`is_component_disabled` — flips a flag without a structural move or losing the stored value |
 | Queries | `View` over N tables (`excludes`, optional `filter`, `refilter()`/`rebuild()`), incrementally maintained; `Group` for enforced-alignment iteration | `query(world, {...})` term list per call, auto-cached (invalidated only when a new archetype appears); term builders `all`/`and`, `or`/`some`, `not`/`none`, `pair`, `hierarchy`/`cascade` for depth-ordered relation iteration |
-| Iteration API | Direct table loop, `Iterator` over views (dense fast path, `for v1, v2 in ecs.iterate(&it, &t1, &t2)` sugar), `view_dense_slice`/`group_dense_slice` raw-SoA batch APIs | `for arch in query(...) { get_table(world, arch, T) }` — a raw column slice per matched archetype per component type |
+| Iteration API | Direct table loop, `Iterator` over views (dense fast path, `for v1, v2 in ecs.iterate(&it, &t1, &t2)` sugar), `dense_slice` raw-SoA batch APIs | `for arch in query(...) { get_table(world, arch, T) }` — a raw column slice per matched archetype per component type |
 | Systems / scheduler | None — you write plain loops and call them yourself | None — "systems" are just plain procs that call `query`; no phases or scheduling |
 | Structural changes | Immediate (tail-swap, O(1)) by default; opt into deferred via `pause_packing`/`Command_Buffer` | Immediate outside iteration; **automatically deferred** while inside a `query` (and nested queries), flushing when the enclosing scope exits or the next `query()` call runs |
 | Mutation while iterating | Three opt-in mechanisms: manual rule, `pause_packing`/`resume_packing`/`pack` (scoped to Database/Table/Group), or `Command_Buffer` + `replay` | Always-on for query iteration specifically (`@(deferred_in)` on `query`) — no opt-in needed, but the deferral window is the query's lexical scope, not a frame boundary |
@@ -162,7 +162,7 @@ and observers.
   [README.md](README.md) for what this costs at 1M entities).
 - **Fixed, capacity-checked entity/component limits** known up front, vs odecs's dynamically
   growing archetypes and component-id space.
-- **Dense fast path + `view_dense_slice`/`group_dense_slice`:** iteration reads dense arrays
+- **Dense fast path + `dense_slice`:** iteration reads dense arrays
   directly with zero per-row indirection once alignment holds/is enforced; odecs's per-archetype
   columns are also dense SoA, but a component move between archetypes is a real data copy, not
   just a bit flip.
@@ -211,8 +211,8 @@ and observers.
 ## Bottom line
 
 Both libraries are architecturally SoA and land at or near the same iteration hardware floor
-(see [README.md](README.md), scenario 1: odecs's plain query loop vs ODE_ECS's `view_dense_slice`/
-`group_dense_slice`) — the real differences are in scope and structural-operation cost, not raw
+(see [README.md](README.md), scenario 1: odecs's plain query loop vs ODE_ECS's `dense_slice`)
+— the real differences are in scope and structural-operation cost, not raw
 sweep speed. ODE_ECS stays a lean, fully-preallocated core with fixed capacities, immediate O(1)
 structural changes by default, and a deliberately minimal relations model, plus opt-in
 `Command_Buffer`/`pause_packing`/`Overbase`/serialization for the cases that need them. odecs is

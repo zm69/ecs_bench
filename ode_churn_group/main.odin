@@ -52,8 +52,8 @@ main :: proc() {
             cursor = (cursor + 1) % N
         }
         // movement update over all: group dense slices, always aligned (no fallback needed)
-        pos := ecs.group_dense_slice(&movers, &positions)
-        vel := ecs.group_dense_slice(&movers, &velocities)
+        pos := ecs.dense_slice(&movers, &positions)
+        vel := ecs.dense_slice(&movers, &velocities)
         for i in 0..<len(pos) {
             pos[i].x += vel[i].x
             pos[i].y += vel[i].y

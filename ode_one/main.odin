@@ -36,7 +36,7 @@ main :: proc() {
     live_mem := track.current_memory_allocated
 
     // --- Hot loop A: direct table iteration (idiomatic single-component path) ---
-    // table_dense_slice returns positions.rows by value from a call instead of
+    // ecs.dense_slice returns positions.rows by value from a call instead of
     // a raw field access — see its doc comment in ode_ecs/table.odin for why
     // that matters: `for &p in positions.rows` directly lets the optimizer
     // conservatively re-derive the rows pointer from `positions` after every
@@ -44,7 +44,7 @@ main :: proc() {
     time.stopwatch_reset(&sw)
     time.stopwatch_start(&sw)
     for f in 0..<FRAMES {
-        for &p in ecs.table_dense_slice(&positions) {
+        for &p in ecs.dense_slice(&positions) {
             p.x += p.y
         }
     }

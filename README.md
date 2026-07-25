@@ -28,8 +28,8 @@ all binaries alternating
 within each pass) rather than reusing older numbers, since absolute timings drift between
 sessions (see Method notes) and mixing passes would misattribute noise as a real delta. Each
 library uses its idiomatic fast path: ODE_ECS via direct table iteration, `View` + `Iterator`,
-`view_dense_slice`, an owned `Group` + `group_dense_slice`, or (new) `Arch_Table` +
-`arch_table__dense_slice`; moecs via an `ARCHETYPE` system driven by `progress()`; odecs via a
+`dense_slice(&view, &table)`, an owned `Group` + `dense_slice(&group, &table)`, or (new)
+`Arch_Table` + `arch_table__dense_slice`; moecs via an `ARCHETYPE` system driven by `progress()`; odecs via a
 per-frame `query` + `get_table` batch loop over its archetype columns (the pattern its own
 docs and bundled benchmarks use).
 
@@ -87,7 +87,7 @@ All numbers are medians of 3 runs, all binaries alternating within each pass.
 
 Each entity has one `Position{x,y:f64}`; per frame `pos.x += pos.y`. This isolates raw
 iteration with no multi-component lookup at all — ODE_ECS iterates the `Table` directly via
-`ecs.table_dense_slice(&positions)` (see fix note below), moecs runs a one-component archetype
+`ecs.dense_slice(&positions)` (see fix note below), moecs runs a one-component archetype
 system, odecs sweeps its single archetype's `Position` column via `get_table`. No `Arch_Table`
 variant: an archetype with one column is the same layout as a plain `Table`.
 
@@ -111,8 +111,11 @@ compiled assembly (`-build-mode:asm`): a redundant `movq <offset>(%rcx), %r11` b
 the loop's two unrolled elements, on every iteration. odecs's equivalent loop iterates a local
 slice variable returned by `get_table` (not a field access), so LLVM keeps the pointer in a
 register for the whole loop — no reload, no aliasing ambiguity. The library now exposes
-`table__dense_slice`/`ecs.table_dense_slice` (mirroring `view_dense_slice`/`group_dense_slice`/
-`arch_table__dense_slice` for the other three table types) — it returns `rows` by value from a
+`table__dense_slice`, callable as `ecs.dense_slice(&positions)` — part of a single unified
+`dense_slice` proc group that also covers `Compact_Table`/`Tiny_Table`/`Tag_Table`
+(`ecs.dense_slice(&t)`), `View`/`Group` (`ecs.dense_slice(&view, &table)` /
+`ecs.dense_slice(&group, &table)`), and stands alongside the separately-named
+`arch_table__dense_slice` for `Arch_Table` — it returns `rows` by value from a
 call, giving the caller a fresh local slice with no aliasing back to the `Table`, which is
 enough on its own (even `#force_inline`d) to eliminate the reload. `ode_one`'s hot loop was
 updated to use it; the fix requires no user-facing behavior change, only 12 new lines of
@@ -135,9 +138,9 @@ Each entity has `Position{x,y:f64}` + `Velocity{x,y:f64}`; per frame `pos += vel
 
 | Library | setup | iter/frame | ns/ent/frame | live mem |
 |---------|-------|------------|--------------|----------|
-| ODE_ECS (iterator)             | 17.3 ms     | 0.59 ms | 0.59     | 103 MB    |
-| ODE_ECS (`view_dense_slice`)   | 16.7 ms     | 0.30 ms | 0.30     | 103 MB    |
-| ODE_ECS (`group_dense_slice`)  | 15.3 ms     | 0.31 ms | 0.31     | 83 MB     |
+| ODE_ECS (iterator)                     | 17.3 ms     | 0.59 ms | 0.59     | 103 MB    |
+| ODE_ECS (`dense_slice`, view)          | 16.7 ms     | 0.30 ms | 0.30     | 103 MB    |
+| ODE_ECS (`dense_slice`, group)         | 15.3 ms     | 0.31 ms | 0.31     | 83 MB     |
 | ODE_ECS (`arch_table__dense_slice`) | **13.6 ms** | **0.29 ms** | **0.29** | **72 MB** |
 | moecs                          | 722.9 ms    | 4.19 ms | 4.19     | 184 MB    |
 | odecs                          | 6,260.8 ms  | 0.30 ms | 0.30     | 66 MB     |
@@ -286,7 +289,7 @@ newly-indexed archetype), and this is the only scenario where that copy cost sca
 (non-uniform) component sizes rather than a flat 16 bytes. ODE_ECS's `View` vs `Group`
 trade-off reproduces scenarios 1-3's pattern, just sharper here: `Group` costs ~1.4-1.5x more
 per structural op (every membership-affecting mutation swaps across three tables whose rows
-run up to 500 bytes) but iterates ~2.4x faster, since `group_dense_slice` never re-verifies
+run up to 500 bytes) but iterates ~2.4x faster, since `Group`'s `dense_slice` never re-verifies
 alignment.
 
 # What the scenarios reveal

@@ -99,9 +99,9 @@ main :: proc() {
     sw_iter: time.Stopwatch
     time.stopwatch_start(&sw_iter)
     for f in 0..<FRAMES {
-        c2 := ecs.group_dense_slice(&grp, &t2)
-        c3 := ecs.group_dense_slice(&grp, &t3)
-        c4 := ecs.group_dense_slice(&grp, &t4)
+        c2 := ecs.dense_slice(&grp, &t2)
+        c3 := ecs.dense_slice(&grp, &t3)
+        c4 := ecs.dense_slice(&grp, &t4)
         for i in 0..<len(c3) {
             c3[i].x = c3[i].x + c2[i].x
             c3[i].x = c3[i].x + c4[i].x

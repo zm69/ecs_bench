@@ -51,8 +51,8 @@ main :: proc() {
             cursor = (cursor + 1) % N
         }
         // movement update over all: batch (dense slice) path with iterator fallback
-        pos := ecs.view_dense_slice(&movers, &positions)
-        vel := ecs.view_dense_slice(&movers, &velocities)
+        pos := ecs.dense_slice(&movers, &positions)
+        vel := ecs.dense_slice(&movers, &velocities)
         if pos != nil && vel != nil {
             for i in 0..<len(pos) {
                 pos[i].x += vel[i].x
