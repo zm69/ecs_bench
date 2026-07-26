@@ -11,21 +11,22 @@ archetype approach but differ sharply in scope: moecs is a batteries-included fr
 (archetypes, observers, relationships-as-pairs, query terms) with no scheduler or resources.
 For measured performance numbers see [README.md](README.md).
 
-As of July 24, 2026: ODE_ECS at commit `2e8268c`, moecs at commit `ccd00f2` (source unchanged
-since `8d50786` — the newer commits are README-only), odecs at commit `e3ca0a5` (unchanged
-since 7/5/2026).
+As of July 25, 2026: ODE_ECS at commit `acfe11c` (added `Arch_Table`, an opt-in true-archetype
+table, and a `Table`-iteration codegen fix — see below), moecs at commit `ccd00f2` (source
+unchanged since `8d50786` — the newer commits are README-only), odecs at commit `e3ca0a5`
+(unchanged since 7/5/2026).
 
 # ODE_ECS vs moecs
 
 ODE_ECS shipped a large batch of features in July 2026 not covered by earlier versions of this
-doc: `Group`, `Command_Buffer`, `Relations_Table`, `Overbase`, binary serialization, and view
-`excludes`/`refilter` — all included below.
+doc: `Group`, `Arch_Table`, `Command_Buffer`, `Relations_Table`, `Overbase`, binary serialization,
+and view `excludes`/`refilter` — all included below.
 
 ## At a glance
 
 | Feature | ODE_ECS | moecs |
 |---|---|---|
-| Architecture | Relational: dense SoA `Table` per component type + `View`s/`Group`s | Archetype: AoS chunks per entity in memory blocks |
+| Architecture | Relational: dense SoA `Table` per component type + `View`s/`Group`s, plus an opt-in true-archetype `Arch_Table` for fixed component sets | Archetype: AoS chunks per entity in memory blocks |
 | License | zlib | MIT |
 | Multiple worlds | Yes — any number of independent `Database`s | Yes — any number of `World`s in one space |
 | Shared entity ID space | `Overbase` — attach several `Database`s to one shared id space; destroying an entity through any attached Database removes its components everywhere | None — `World`s are independent id spaces |
@@ -33,11 +34,11 @@ doc: `Group`, `Command_Buffer`, `Relations_Table`, `Overbase`, binary serializat
 | Memory model | Everything preallocated up front; **no hidden allocations** during the game loop | Block/chunk allocation; new blocks allocated as the world grows |
 | Custom allocators | Yes, per `Database` (propagates to tables/views/groups) | No explicit allocator API |
 | Entity count | Fixed `entities_cap` chosen at init | Unlimited (grows by blocks) |
-| Component storage | 100% dense per-type arrays (SoA), tail-swap on remove | Per-entity chunk holding all its components (AoS), bit flags for presence |
+| Component storage | 100% dense per-type arrays (SoA), tail-swap on remove; opt-in `Arch_Table` bundles N columns under one shared row index for sets that always travel together | Per-entity chunk holding all its components (AoS), bit flags for presence |
 | Component type limit | 128 default, unlimited via `ECS_TABLES_MULT` config | `MAX_COMPONENTS_COUNT` constant (128 default, edit manually) |
 | Memory-lean table variants | `Compact_Table`, `Tiny_Table` for sparse component types (both support pause/resume packing like `Table`) | — (one chunk layout; sparse entities still reserve full chunk row) |
 | Tags | `Tag_Table` (dense entity list, composable into views; supports pause/resume packing) | Bit-flag tags — set/unset is just a bit write, no storage |
-| Queries | `View` over N tables (`excludes` list for structural negation, optional `filter` proc, `refilter()`/`rebuild()`), incrementally maintained on add/remove; `Group` for a fixed owned-table set with enforced alignment | System match queries: components + tags + relations, plus `without` exclusion |
+| Queries | `View` over N tables (`excludes` list for structural negation, optional `filter` proc, `refilter()`/`rebuild()`), incrementally maintained on add/remove; `Group` for a fixed owned-table set with enforced alignment; `Arch_Table` + `Arch_Iterator`/`arch_table__dense_slice` for a true-archetype subset | System match queries: components + tags + relations, plus `without` exclusion |
 | Iteration API | Direct table loop, `Iterator` over views (automatic dense fast path, `for v1, v2 in ecs.iterate(&it, &t1, &t2)` sugar), `dense_slice` raw-SoA batch APIs | System callbacks driven by `progress()`; `each()` for all entities |
 | Systems / scheduler | None — you write plain loops and call them yourself | Built-in: `mount` with phases (START / PRE_UPDATE / UPDATE / POST_UPDATE / MANUAL), named systems, `enable` / `disable` / `execute` |
 | Structural changes | Immediate (tail-swap, O(1)) by default; opt into deferred via `pause_packing`/`Command_Buffer` (below) | Deferred to end of progress step (`perform` stage) |
@@ -63,6 +64,13 @@ doc: `Group`, `Command_Buffer`, `Relations_Table`, `Overbase`, binary serializat
 - **`Group`:** exclusive ownership of a fixed set of tables that *enforces* (not just detects)
   dense alignment — no per-row fallback structure at all, at the cost of a row swap on every
   membership change. See [README.md](README.md) for when it beats a `View`.
+- **`Arch_Table`:** opt-in true-archetype storage — bundle a component set that always travels
+  together (e.g. `Position`+`Velocity`) into one archetype row with a single shared index,
+  rather than moecs's unconditional per-entity chunk storage for *everything*. Lets a database
+  mix archetype-style locality where it pays off with plain `Table`s where components have
+  independent lifetimes, instead of committing the whole entity model to one storage shape.
+  Whole-row membership only — no per-column add/remove, so it isn't a fit for components that
+  toggle independently on a live entity.
 - **Table variants for sparse data** (`Compact_Table`, `Tiny_Table`) to keep memory
   proportional to actual component counts.
 - **Two independent deferred-mutation mechanisms**, usable together or apart:
@@ -105,8 +113,9 @@ ODE_ECS is a lean iteration engine that has grown a deliberate, opt-in set of ex
 core concepts (database, table, view, group, relations), immediate O(1) structural changes by
 default, zero hidden allocations, the fastest iteration paths, plus `Command_Buffer`/
 `pause_packing` when you do need deferred safety, `Overbase` when you need a shared id space,
-and binary snapshots when you need save/load — all still opt-in, so the zero-cost default path
-is untouched if you don't reach for them. Its relations remain deliberately minimal
+`Arch_Table` when a component set benefits from true-archetype locality, and binary snapshots
+when you need save/load — all still opt-in, so the zero-cost default path is untouched if you
+don't reach for them. Its relations remain deliberately minimal
 (parent/child, no attached data). moecs is a framework: scheduler, queries, observers, typed
 relations, and resources out of the box, with always-on deferred-safety as the default rather
 than an opt-in, paid for with per-entity chunk storage that iterates slower (see the
@@ -126,7 +135,7 @@ and observers.
 
 | Feature | ODE_ECS | odecs |
 |---|---|---|
-| Architecture | Relational: dense SoA `Table` per component type + `View`s/`Group`s | Archetype: one dense SoA column per component per archetype |
+| Architecture | Relational: dense SoA `Table` per component type + `View`s/`Group`s, plus an opt-in true-archetype `Arch_Table` for fixed component sets | Archetype: one dense SoA column per component per archetype |
 | License | zlib | MIT |
 | Multiple worlds | Yes — any number of independent `Database`s | Yes — any number of independent `World`s (`create_world`) |
 | Shared entity ID space | `Overbase` — attach several `Database`s to one shared id space | None — each `World` is its own id space |
@@ -134,12 +143,12 @@ and observers.
 | Memory model | Everything preallocated up front; **no hidden allocations** during the game loop | Archetypes/columns grow dynamically; `add_entity`'s variadic `..any` path allocates temp-allocator scratch per call (see [README.md](README.md)) |
 | Custom allocators | Yes, per `Database` (propagates to tables/views/groups) | Yes, per `World` — a separate `cache_allocator` for the query cache (e.g. so it can survive an arena snapshot/rollback for rollback netcode) |
 | Entity count | Fixed `entities_cap` chosen at init | Unlimited (archetypes/columns grow as needed) |
-| Component storage | 100% dense per-type arrays (SoA) across the whole `Database`, tail-swap on remove | Dense per-type arrays (SoA) *within each archetype*; an entity's components live in whichever archetype matches its exact component set — adding/removing a component moves the whole row to a different archetype |
+| Component storage | 100% dense per-type arrays (SoA) across the whole `Database`, tail-swap on remove; opt-in `Arch_Table` gives a fixed component set its own true-archetype row (one shared index across its columns), scoped to just that set rather than the whole database | Dense per-type arrays (SoA) *within each archetype*; an entity's components live in whichever archetype matches its exact component set — adding/removing a component moves the whole row to a different archetype |
 | Component type limit | 128 default, unlimited via `ECS_TABLES_MULT` config | No fixed limit (component ids are dynamically assigned) |
 | Memory-lean table variants | `Compact_Table`, `Tiny_Table` for sparse component types | — (sparse component combinations instead create more, smaller archetypes) |
 | Tags | `Tag_Table` (dense entity list, composable into views) | Zero-sized tag structs — a tag is just a component type with no fields, stored as its own archetype-defining bit like any other component |
 | Component enable/disable | None — use `remove_component`/`add_component` (structural) | `disable_component`/`enable_component`/`is_component_disabled` — flips a flag without a structural move or losing the stored value |
-| Queries | `View` over N tables (`excludes`, optional `filter`, `refilter()`/`rebuild()`), incrementally maintained; `Group` for enforced-alignment iteration | `query(world, {...})` term list per call, auto-cached (invalidated only when a new archetype appears); term builders `all`/`and`, `or`/`some`, `not`/`none`, `pair`, `hierarchy`/`cascade` for depth-ordered relation iteration |
+| Queries | `View` over N tables (`excludes`, optional `filter`, `refilter()`/`rebuild()`), incrementally maintained; `Group` for enforced-alignment iteration; `Arch_Table` + `Arch_Iterator`/`arch_table__dense_slice` for a single fixed archetype | `query(world, {...})` term list per call, auto-cached (invalidated only when a new archetype appears); term builders `all`/`and`, `or`/`some`, `not`/`none`, `pair`, `hierarchy`/`cascade` for depth-ordered relation iteration |
 | Iteration API | Direct table loop, `Iterator` over views (dense fast path, `for v1, v2 in ecs.iterate(&it, &t1, &t2)` sugar), `dense_slice` raw-SoA batch APIs | `for arch in query(...) { get_table(world, arch, T) }` — a raw column slice per matched archetype per component type |
 | Systems / scheduler | None — you write plain loops and call them yourself | None — "systems" are just plain procs that call `query`; no phases or scheduling |
 | Structural changes | Immediate (tail-swap, O(1)) by default; opt into deferred via `pause_packing`/`Command_Buffer` | Immediate outside iteration; **automatically deferred** while inside a `query` (and nested queries), flushing when the enclosing scope exits or the next `query()` call runs |
@@ -169,6 +178,14 @@ and observers.
 - **`Group`:** exclusive table ownership that *enforces* dense alignment; odecs's archetypes
   give the equivalent guarantee by construction for any one archetype, but an entity whose
   component set doesn't yet match one exact archetype gets no such guarantee until it's created.
+- **`Arch_Table`:** a true-archetype table matching odecs's own per-archetype dense-column
+  storage for one fixed component set, without adopting odecs's whole-database archetype model
+  — the rest of the `Database` stays plain `Table`s. The trade is the opposite of odecs's:
+  `Arch_Table` is a *single* fixed archetype with no automatic migration between archetypes, so
+  it only fits component sets that are static per entity (odecs instead auto-migrates an entity
+  to a new archetype on every add/remove, at the cost of a structural copy each time — see
+  scenario 5 in [README.md](README.md), where odecs's per-column churn model is the only one of
+  the two that can represent the workload at all).
 - **Table variants for sparse data** (`Compact_Table`, `Tiny_Table`) to keep memory proportional
   to actual component counts, rather than letting sparse combinations multiply archetype count.
 - **`pause_packing`/`Command_Buffer`:** two explicit, composable ways to defer structural
@@ -200,6 +217,11 @@ and observers.
   including ones caused by `Exclusive`/`Cascade` relation side effects, not just plain
   component add/remove.
 - **Unlimited entity count and component-type count** — no capacity chosen up front for either.
+- **Automatic archetype migration for arbitrary component combinations:** any add/remove moves
+  an entity to whichever archetype matches its new exact component set, creating that archetype
+  on demand if needed. ODE_ECS's `Arch_Table` is a single fixed archetype with no such migration
+  — mixing archetype storage into an ODE_ECS database means picking specific static component
+  sets up front (`Arch_Table` per set) rather than letting arbitrary combinations happen.
 - **Automatic deferred mutation scoped to iteration, no opt-in required:** any structural change
   made while a `query` is open is deferred and flushed automatically at scope exit — closer to
   moecs's always-on model than to ODE_ECS's opt-in mechanisms, but scoped per-query rather than
@@ -213,14 +235,23 @@ and observers.
 Both libraries are architecturally SoA and land at or near the same iteration hardware floor
 (see [README.md](README.md), scenario 1: odecs's plain query loop vs ODE_ECS's `dense_slice`)
 — the real differences are in scope and structural-operation cost, not raw
-sweep speed. ODE_ECS stays a lean, fully-preallocated core with fixed capacities, immediate O(1)
-structural changes by default, and a deliberately minimal relations model, plus opt-in
-`Command_Buffer`/`pause_packing`/`Overbase`/serialization for the cases that need them. odecs is
-a minimal *but dynamic* core inspired by Flecs: general typed relationships with wildcard
-queries and hierarchy iteration, a richer query term language, and automatic per-query deferred
-mutation — paid for with dynamically growing archetype storage and a very expensive entity-
-creation path (its variadic `add_entity` is the single biggest number separating the two
-libraries in the benchmarks — see README.md scenario 0/1). Pick ODE_ECS when you want fixed
-memory budgets and fast structural operations (spawning, despawning, re-parenting) at scale;
-pick odecs when you want Flecs-style general relationships and query expressiveness and can
-afford (or avoid, by creating entities rarely) its archetype-churn and entity-creation costs.
+sweep speed. `Arch_Table` narrows the architectural gap further for one specific shape: a fixed
+component set that never changes membership on a live entity now gets true-archetype storage
+in ODE_ECS too, and comes out ahead of odecs's equivalent archetype on every measured axis for
+that shape (README scenario 1/3: ~460x faster setup, ties iteration, ~6x faster churn). But it's
+a single static archetype, not odecs's auto-migrating model — for entities whose component set
+is assembled or mutated dynamically at the individual-component level, odecs's whole-database
+archetype migration is the only one of the two designs that represents the workload at all
+(README scenario 5). ODE_ECS stays a lean, fully-preallocated core with fixed capacities,
+immediate O(1) structural changes by default, and a deliberately minimal relations model, plus
+opt-in `Command_Buffer`/`pause_packing`/`Overbase`/`Arch_Table`/serialization for the cases that
+need them. odecs is a minimal *but dynamic* core inspired by Flecs: general typed relationships
+with wildcard queries and hierarchy iteration, a richer query term language, and automatic
+per-query deferred mutation — paid for with dynamically growing archetype storage and a very
+expensive entity-creation path (its variadic `add_entity` is the single biggest number
+separating the two libraries in the benchmarks — see README.md scenario 0/1). Pick ODE_ECS when
+you want fixed memory budgets and fast structural operations (spawning, despawning,
+re-parenting) at scale, reaching for `Arch_Table` on the component sets that are static per
+entity; pick odecs when you want Flecs-style general relationships, query expressiveness, and
+automatic migration across arbitrary/dynamic component combinations, and can afford (or avoid,
+by creating entities rarely) its archetype-churn and entity-creation costs.
