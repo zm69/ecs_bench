@@ -3,7 +3,7 @@ package bench_ode_churn_arch
 import "core:fmt"
 import "core:time"
 import "core:mem"
-import ecs "../../ode_ecs"
+import ecs "../../ode/ode_ecs"
 
 Position :: struct { x, y: f64 }
 Velocity :: struct { x, y: f64 }

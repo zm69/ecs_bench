@@ -3,7 +3,7 @@ package bench_ode_many
 import "core:fmt"
 import "core:time"
 import "core:mem"
-import ecs "../../ode_ecs"
+import ecs "../../ode/ode_ecs"
 
 // 32 distinct component types, all the same shape (16 bytes).
 C0  :: struct { x, y: f64 } // "Position"

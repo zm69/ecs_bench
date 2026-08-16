@@ -11,10 +11,12 @@ archetype approach but differ sharply in scope: moecs is a batteries-included fr
 (archetypes, observers, relationships-as-pairs, query terms) with no scheduler or resources.
 For measured performance numbers see [README.md](README.md).
 
-As of July 25, 2026: ODE_ECS at commit `acfe11c` (added `Arch_Table`, an opt-in true-archetype
-table, and a `Table`-iteration codegen fix — see below), moecs at commit `ccd00f2` (source
-unchanged since `8d50786` — the newer commits are README-only), odecs at commit `e3ca0a5`
-(unchanged since 7/5/2026).
+As of August 15, 2026: ODE_ECS at commit `cafc8b8` (since the July 25 `acfe11c` snapshot: added
+component `enable_component`/`disable_component` — a soft, bitset-based toggle that excludes a
+component from `View` matching without a structural move or losing its stored value — and View
+`any_of`, an OR combinator completing `includes`(AND)/`excludes`(NOT); see below), moecs at
+commit `ccd00f2` (source unchanged since `8d50786` — the newer commits are README-only), odecs at
+commit `e3ca0a5` (unchanged since 7/5/2026).
 
 # ODE_ECS vs moecs
 
@@ -38,7 +40,8 @@ and view `excludes`/`refilter` — all included below.
 | Component type limit | 128 default, unlimited via `ECS_TABLES_MULT` config | `MAX_COMPONENTS_COUNT` constant (128 default, edit manually) |
 | Memory-lean table variants | `Compact_Table`, `Tiny_Table` for sparse component types (both support pause/resume packing like `Table`) | — (one chunk layout; sparse entities still reserve full chunk row) |
 | Tags | `Tag_Table` (dense entity list, composable into views; supports pause/resume packing) | Bit-flag tags — set/unset is just a bit write, no storage |
-| Queries | `View` over N tables (`excludes` list for structural negation, optional `filter` proc, `refilter()`/`rebuild()`), incrementally maintained on add/remove; `Group` for a fixed owned-table set with enforced alignment; `Arch_Table` + `Arch_Iterator`/`arch_table__dense_slice` for a true-archetype subset | System match queries: components + tags + relations, plus `without` exclusion |
+| Component enable/disable | `disable_component`/`enable_component`/`is_component_disabled` — flips a flag without a structural move or losing the stored value (View-matching only; a `Group`'s dense prefix and `Command_Buffer`/serialization don't see it) | None — use `add_component`/`remove_component` (structural) or a separate bit-flag tag |
+| Queries | `View` over N tables (`includes` AND, `excludes` NOT, `any_of` OR, optional `filter` proc, `refilter()`/`rebuild()`), incrementally maintained on add/remove; `Group` for a fixed owned-table set with enforced alignment; `Arch_Table` + `Arch_Iterator`/`arch_table__dense_slice` for a true-archetype subset | System match queries: components + tags + relations, plus `without` exclusion |
 | Iteration API | Direct table loop, `Iterator` over views (automatic dense fast path, `for v1, v2 in ecs.iterate(&it, &t1, &t2)` sugar), `dense_slice` raw-SoA batch APIs | System callbacks driven by `progress()`; `each()` for all entities |
 | Systems / scheduler | None — you write plain loops and call them yourself | Built-in: `mount` with phases (START / PRE_UPDATE / UPDATE / POST_UPDATE / MANUAL), named systems, `enable` / `disable` / `execute` |
 | Structural changes | Immediate (tail-swap, O(1)) by default; opt into deferred via `pause_packing`/`Command_Buffer` (below) | Deferred to end of progress step (`perform` stage) |
@@ -88,6 +91,9 @@ and view `excludes`/`refilter` — all included below.
   multiple databases.
 - **Cycle-safe relations:** `set_parent` always rejects cycles (`Relation_Cycle`), so cascade
   destroy can never recurse forever; moecs performs no cycle check when relating entities.
+- **Component enable/disable:** `disable_component`/`enable_component` soft-toggle a component
+  out of/into `View` matching without touching its stored data or moving the row — moecs has no
+  component-granularity equivalent (its `enable`/`disable` is a scheduler-level system switch).
 
 ## What only moecs has
 
@@ -147,8 +153,8 @@ and observers.
 | Component type limit | 128 default, unlimited via `ECS_TABLES_MULT` config | No fixed limit (component ids are dynamically assigned) |
 | Memory-lean table variants | `Compact_Table`, `Tiny_Table` for sparse component types | — (sparse component combinations instead create more, smaller archetypes) |
 | Tags | `Tag_Table` (dense entity list, composable into views) | Zero-sized tag structs — a tag is just a component type with no fields, stored as its own archetype-defining bit like any other component |
-| Component enable/disable | None — use `remove_component`/`add_component` (structural) | `disable_component`/`enable_component`/`is_component_disabled` — flips a flag without a structural move or losing the stored value |
-| Queries | `View` over N tables (`excludes`, optional `filter`, `refilter()`/`rebuild()`), incrementally maintained; `Group` for enforced-alignment iteration; `Arch_Table` + `Arch_Iterator`/`arch_table__dense_slice` for a single fixed archetype | `query(world, {...})` term list per call, auto-cached (invalidated only when a new archetype appears); term builders `all`/`and`, `or`/`some`, `not`/`none`, `pair`, `hierarchy`/`cascade` for depth-ordered relation iteration |
+| Component enable/disable | `disable_component`/`enable_component`/`is_component_disabled` — flips a flag without a structural move or losing the stored value; View-matching only (a `Group`'s dense prefix, `Command_Buffer`, and serialization don't see it) | `disable_component`/`enable_component`/`is_component_disabled` — flips a flag without a structural move or losing the stored value |
+| Queries | `View` over N tables (`includes` AND, `excludes` NOT, `any_of` OR, optional `filter`, `refilter()`/`rebuild()`), incrementally maintained; `Group` for enforced-alignment iteration; `Arch_Table` + `Arch_Iterator`/`arch_table__dense_slice` for a single fixed archetype | `query(world, {...})` term list per call, auto-cached (invalidated only when a new archetype appears); term builders `all`/`and`, `or`/`some`, `not`/`none`, `pair`, `hierarchy`/`cascade` for depth-ordered relation iteration |
 | Iteration API | Direct table loop, `Iterator` over views (dense fast path, `for v1, v2 in ecs.iterate(&it, &t1, &t2)` sugar), `dense_slice` raw-SoA batch APIs | `for arch in query(...) { get_table(world, arch, T) }` — a raw column slice per matched archetype per component type |
 | Systems / scheduler | None — you write plain loops and call them yourself | None — "systems" are just plain procs that call `query`; no phases or scheduling |
 | Structural changes | Immediate (tail-swap, O(1)) by default; opt into deferred via `pause_packing`/`Command_Buffer` | Immediate outside iteration; **automatically deferred** while inside a `query` (and nested queries), flushing when the enclosing scope exits or the next `query()` call runs |
@@ -207,12 +213,11 @@ and observers.
 - **`Wildcard` relation queries:** `query(world, {pair(ChildOf, Wildcard)})` to match "all
   entities related via ChildOf to anything," and depth-ordered `hierarchy`/`cascade` iteration
   (parents before children) built into the query itself.
-- **Rich query term language:** `all`/`and`, `or`/`some`, `not`/`none`, and `pair` compose
-  freely and mix with plain typeids in one query call — ODE_ECS's nearest equivalent (a `View`'s
-  `excludes` list plus an optional `filter` proc) is less expressive for OR/wildcard-shaped
-  queries.
-- **Component enable/disable:** toggle a component's presence for query-matching purposes
-  without removing it (and losing its stored value) or moving the entity's row.
+- **Rich query term language:** `all`/`and`, `or`/`some`, `not`/`none`, and `pair` compose freely
+  and mix with plain typeids in one query call — ODE_ECS's `View` now covers the same AND/OR/NOT
+  shape (`includes`/`any_of`/`excludes`), but as three separate lists set at `view_init`/
+  `refilter` time rather than terms composed ad hoc per call, and with no `pair`/wildcard
+  equivalent.
 - **Observers on relation traits:** `on_add`/`on_remove` fire on any archetype transition,
   including ones caused by `Exclusive`/`Cascade` relation side effects, not just plain
   component add/remove.

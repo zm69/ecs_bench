@@ -3,7 +3,7 @@ package bench_ode_many_arch
 import "core:fmt"
 import "core:time"
 import "core:mem"
-import ecs "../../ode_ecs"
+import ecs "../../ode/ode_ecs"
 
 // 32 distinct component types, all the same shape (16 bytes). C0/C1 (the ones
 // movement touches) live together in one Arch_Table row; C2..C31 stay ordinary
