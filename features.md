@@ -11,12 +11,15 @@ archetype approach but differ sharply in scope: moecs is a batteries-included fr
 (archetypes, observers, relationships-as-pairs, query terms) with no scheduler or resources.
 For measured performance numbers see [README.md](README.md).
 
-As of August 15, 2026: ODE_ECS at commit `cafc8b8` (since the July 25 `acfe11c` snapshot: added
-component `enable_component`/`disable_component` — a soft, bitset-based toggle that excludes a
-component from `View` matching without a structural move or losing its stored value — and View
-`any_of`, an OR combinator completing `includes`(AND)/`excludes`(NOT); see below), moecs at
-commit `ccd00f2` (source unchanged since `8d50786` — the newer commits are README-only), odecs at
-commit `e3ca0a5` (unchanged since 7/5/2026).
+As of August 16, 2026: ODE_ECS at commit `575d8c4` (since the August 15 `cafc8b8` snapshot: added
+production-hardened many-to-many relations via `Pair_Table(T)` — `View` integration through an
+embedded `presence` `Tag_Table`, `Command_Buffer` and binary-serialization support, and O(1)
+automatic cleanup when either side of a pair is destroyed — plus a new opt-in `Observer` feature:
+structural-change callbacks for entity create/destroy, component/tag/pair add/remove,
+enable/disable, and parent set/remove, off by default and **compile-time zero-cost** when
+disabled (`-define:ECS_OBSERVERS_ENABLED=true` to opt in); see below), moecs at commit `ccd00f2`
+(source unchanged since `8d50786` — the newer commits are README-only), odecs at commit `e3ca0a5`
+(unchanged since 7/5/2026).
 
 # ODE_ECS vs moecs
 
@@ -46,8 +49,8 @@ and view `excludes`/`refilter` — all included below.
 | Systems / scheduler | None — you write plain loops and call them yourself | Built-in: `mount` with phases (START / PRE_UPDATE / UPDATE / POST_UPDATE / MANUAL), named systems, `enable` / `disable` / `execute` |
 | Structural changes | Immediate (tail-swap, O(1)) by default; opt into deferred via `pause_packing`/`Command_Buffer` (below) | Deferred to end of progress step (`perform` stage) |
 | Mutation while iterating | Three opt-in mechanisms: manual rule ("don't mutate while iterating"); `pause_packing`/`resume_packing`/`pack`, scoped to a `Database`, `Table`, or `Group`; or a `Command_Buffer` that records `destroy_entity`/add/remove-component/tag/`set_parent` and applies them later with `replay` (also composes with `pause_packing`) | Safe by design and always-on — despawns and archetype moves are deferred automatically, no opt-in needed |
-| Observers / events | None | 9 event types (SPAWNED, DESPAWNED, ADDED, REMOVED, SET, TAGGED, UNTAGGED, RELATED, UNRELATED), per-type on/off |
-| Entity relations | Parent/child via `Relations_Table` (one parent per child): O(1) set/remove/reparent, always-on cycle check, orphan-on-destroy or cascading `destroy_children`; deferrable via `Command_Buffer`'s `cmd_set_parent`/`cmd_remove_parent` | One-to-one and one-to-many, with relationship data; built-in `ChildOf` / `ParentOf` / `RelationOf`, multi-parent, cascade despawn of orphaned children |
+| Observers / events | `Observer` — 14 structural-change kinds (entity create/destroy, component/tag/pair add/remove, enable/disable, parent set/remove) via one database-wide registry with per-observer `interested_in` filtering; fires identically for immediate calls and `Command_Buffer` replay; off by default and **compile-time zero-cost** when disabled (`-define:ECS_OBSERVERS_ENABLED=true` to opt in) — the notify code doesn't exist in the binary, not just a skipped branch | 9 event types (SPAWNED, DESPAWNED, ADDED, REMOVED, SET, TAGGED, UNTAGGED, RELATED, UNRELATED), per-type on/off |
+| Entity relations | Parent/child via `Relations_Table` (one parent per child): O(1) set/remove/reparent, always-on cycle check, orphan-on-destroy or cascading `destroy_children`, deferrable via `Command_Buffer`'s `cmd_set_parent`/`cmd_remove_parent`; **plus** many-to-many via `Pair_Table(T)` — any holder can point at any number of targets with typed payload data, participates in `View` matching via an embedded `presence` `Tag_Table`, O(1) auto-cleanup when either side is destroyed, `Command_Buffer` (`cmd_pair_add`/`cmd_pair_remove`) and serialization support | One-to-one and one-to-many, with relationship data; built-in `ChildOf` / `ParentOf` / `RelationOf`, multi-parent, cascade despawn of orphaned children |
 | Resources (singletons) | None (use plain Odin globals/structs) | First-class registered resources with `set` / `get` / `get_mut` |
 | Entity lifetimes | One kind | `DYNAMIC` and `STATIC` (never-despawned) entities in separate blocks |
 | Serialization | Binary snapshot of a whole `Database` (`serialize`/`deserialize`, `save_to_file`/`load_from_file`); requires POD components; views/groups are derived and rebuilt on load, not stored; `Overbase`-aware (shared id-space databases snapshot only their own tables) | None |
@@ -94,16 +97,30 @@ and view `excludes`/`refilter` — all included below.
 - **Component enable/disable:** `disable_component`/`enable_component` soft-toggle a component
   out of/into `View` matching without touching its stored data or moving the row — moecs has no
   component-granularity equivalent (its `enable`/`disable` is a scheduler-level system switch).
+- **Many-to-many relations with O(1) target-destroy cleanup:** `Pair_Table(T)` walks only the
+  destroyed entity's own pair rows (via a target-side doubly-linked list) when either side of a
+  pair is destroyed, not the whole table — the universal `destroy_entity` hot path stays cheap
+  for entities that never appear in any `Pair_Table`.
+- **Compile-time zero-cost `Observer` gating:** off by default, and disabling it removes the
+  notify code from the binary entirely (`when OBSERVERS_ENABLED` at every hook site) rather than
+  a runtime toggle — empirically verified against the churn benchmarks to add no measurable
+  overhead when unused. moecs's observers have no equivalent all-or-nothing compile-time switch.
 
 ## What only moecs has
 
 - **Systems with a scheduler:** phased pipeline, named systems, enable/disable, manual
   execution, task systems (no query).
 - **Query language:** match on components + tags + relations with a `without` exclusion list.
-- **Observers:** subscribe to structural, tag, data, and relation events per type.
-- **Typed relations with attached data:** user-defined relation types carrying relationship
-  data, multi-parent links, and the `RelationOf` reverse index. (ODE_ECS's `Relations_Table`
-  covers parent/child only — one parent per child, no attached data.)
+- **Component-value-mutation events (`SET`) and runtime per-type on/off:** moecs's observers
+  also fire when a component's stored *value* changes, not just when it's added/removed, and
+  each event type can be toggled at runtime. ODE_ECS's `Observer` covers structural changes only
+  (no value-mutation event) and is gated by one compile-time switch for the whole feature —
+  per-observer filtering via `interested_in` only narrows which kinds *that* observer sees once
+  the feature itself is compiled in.
+- **A queryable reverse relation index (`RelationOf`)** built into the query language itself.
+  (ODE_ECS's `Pair_Table(T)` now covers typed many-to-many relation data — closing most of this
+  gap — but exposes only `targets_of(holder)`, not a symmetric `holders_of(target)` query, and
+  `Relations_Table` itself remains parent/child-only with no attached data.)
 - **Resources:** registered singletons with typed accessors.
 - **Deferred safety is always on, not opt-in:** despawn or re-archetype freely from inside any
   system with no setup — changes apply automatically at the end of the frame. (ODE_ECS now has
@@ -119,15 +136,18 @@ ODE_ECS is a lean iteration engine that has grown a deliberate, opt-in set of ex
 core concepts (database, table, view, group, relations), immediate O(1) structural changes by
 default, zero hidden allocations, the fastest iteration paths, plus `Command_Buffer`/
 `pause_packing` when you do need deferred safety, `Overbase` when you need a shared id space,
-`Arch_Table` when a component set benefits from true-archetype locality, and binary snapshots
-when you need save/load — all still opt-in, so the zero-cost default path is untouched if you
-don't reach for them. Its relations remain deliberately minimal
-(parent/child, no attached data). moecs is a framework: scheduler, queries, observers, typed
-relations, and resources out of the box, with always-on deferred-safety as the default rather
-than an opt-in, paid for with per-entity chunk storage that iterates slower (see the
-benchmarks). Pick ODE_ECS when raw throughput and memory predictability dominate and you want
-deferred-safety/persistence as opt-in tools rather than defaults; pick moecs when you want the
-full framework and its always-on deferred-safety model out of the box.
+`Arch_Table` when a component set benefits from true-archetype locality, `Pair_Table` when you
+need many-to-many relations with typed data, `Observer` when you need structural-change
+callbacks, and binary snapshots when you need save/load — all still opt-in, so the zero-cost
+default path is untouched if you don't reach for them. Its relations now span both a minimal
+parent/child tree (`Relations_Table`) and typed many-to-many links (`Pair_Table`), still without
+moecs's reverse-index query integration or component-value-mutation events. moecs is a
+framework: scheduler, queries, observers, typed relations, and resources out of the box, with
+always-on deferred-safety as the default rather than an opt-in, paid for with per-entity chunk
+storage that iterates slower (see the benchmarks). Pick ODE_ECS when raw throughput and memory
+predictability dominate and you want deferred-safety/persistence as opt-in tools rather than
+defaults; pick moecs when you want the full framework and its always-on deferred-safety model
+out of the box.
 
 # ODE_ECS vs odecs
 
@@ -159,8 +179,8 @@ and observers.
 | Systems / scheduler | None — you write plain loops and call them yourself | None — "systems" are just plain procs that call `query`; no phases or scheduling |
 | Structural changes | Immediate (tail-swap, O(1)) by default; opt into deferred via `pause_packing`/`Command_Buffer` | Immediate outside iteration; **automatically deferred** while inside a `query` (and nested queries), flushing when the enclosing scope exits or the next `query()` call runs |
 | Mutation while iterating | Three opt-in mechanisms: manual rule, `pause_packing`/`resume_packing`/`pack` (scoped to Database/Table/Group), or `Command_Buffer` + `replay` | Always-on for query iteration specifically (`@(deferred_in)` on `query`) — no opt-in needed, but the deferral window is the query's lexical scope, not a frame boundary |
-| Observers / events | None | `observe(world, on_add(...)/on_remove(...), callback)` — fires on archetype entry/exit (component gained/lost, including via relation-trait side effects); explicitly documented as side-effect-only, not for game logic |
-| Entity relations | Parent/child via `Relations_Table` (one parent per child): O(1) set/remove/reparent, always-on cycle check, orphan-on-destroy or cascading `destroy_children`; deferrable via `Command_Buffer` | Flecs-style *pairs* (`pair(Relation, Target)`) — general many-to-many relationships, not just parent/child, can carry data (`add_pair(world, e, Contains{50}, gold)`), queryable with `Wildcard` targets; `Exclusive` trait (single-target, auto-replaces) and `Cascade` trait (deleting the target deletes dependents) opt a relation type into parent/child-like semantics; no cycle check |
+| Observers / events | `Observer` — 14 structural-change kinds via one database-wide registry, per-observer `interested_in` filtering, fires identically for immediate calls and `Command_Buffer` replay; off by default, **compile-time zero-cost** when disabled (`-define:ECS_OBSERVERS_ENABLED=true` to opt in) | `observe(world, on_add(...)/on_remove(...), callback)` — fires on archetype entry/exit (component gained/lost, including via relation-trait side effects); explicitly documented as side-effect-only, not for game logic |
+| Entity relations | Parent/child via `Relations_Table` (one parent per child, cycle-checked, deferrable via `Command_Buffer`); **plus** many-to-many via `Pair_Table(T)` — typed payload data, `View`-integrated through an embedded `presence` `Tag_Table`, O(1) auto-cleanup on either side's destroy, `Command_Buffer`/serialization support | Flecs-style *pairs* (`pair(Relation, Target)`) — general many-to-many relationships, not just parent/child, can carry data (`add_pair(world, e, Contains{50}, gold)`), queryable with `Wildcard` targets; `Exclusive` trait (single-target, auto-replaces) and `Cascade` trait (deleting the target deletes dependents) opt a relation type into parent/child-like semantics; no cycle check |
 | Resources (singletons) | None (use plain Odin globals/structs) | None (use plain Odin globals/structs) |
 | Entity lifetimes | One kind | One kind |
 | Serialization | Binary snapshot of a whole `Database` (`serialize`/`deserialize`, `save_to_file`/`load_from_file`), `Overbase`-aware | None |
@@ -204,23 +224,37 @@ and observers.
   no cycle check, so a manually-constructed relation cycle in odecs is the caller's problem.
 - **Explicit parallelism hooks:** ranged iterators for data-parallel batches, share-nothing
   multiple databases.
+- **Many-to-many relations with O(1) target-destroy cleanup:** `Pair_Table(T)` walks only the
+  destroyed entity's own pair rows when either side of a pair is destroyed, not the whole table —
+  cheap for entities that never appear in any `Pair_Table`, same principle as odecs's own
+  archetype design but scoped per-relation instead of per-entity-component-set.
+- **Compile-time zero-cost `Observer` gating:** off by default, and disabling it removes the
+  notify code from the binary entirely rather than a runtime toggle — empirically verified
+  against the churn benchmarks to add no measurable overhead when unused.
 
 ## What only odecs has
 
-- **Flecs-style general relationships:** pairs are many-to-many and can carry arbitrary data
-  (`add_pair(world, chest, Contains{50}, gold)`), not just parent/child — ODE_ECS's
-  `Relations_Table` covers one parent per child with no attached data.
-- **`Wildcard` relation queries:** `query(world, {pair(ChildOf, Wildcard)})` to match "all
-  entities related via ChildOf to anything," and depth-ordered `hierarchy`/`cascade` iteration
-  (parents before children) built into the query itself.
+- **Wildcard relation queries and semantic traits on pairs:** `Wildcard` targets in queries
+  (`query(world, {pair(ChildOf, Wildcard)})`), and `Exclusive` (single-target, auto-replace) /
+  `Cascade` (deleting the target deletes dependents) traits built into the relation type itself.
+  ODE_ECS's `Pair_Table(T)` now covers odecs's core "many-to-many pairs with typed data" case
+  (`add_pair(world, chest, Contains{50}, gold)` ≈ `pair_add(&pt, chest, gold, Contains{50})`),
+  but has no query-language wildcard matching and no trait system — `Exclusive`/`Cascade`-like
+  semantics would need to be built by hand on top of `pair_add`/`pair_remove`.
+- **Depth-ordered `hierarchy`/`cascade` query iteration** (parents before children) built into
+  the query itself. (ODE_ECS's `Relations_Table` has the read-only equivalent —
+  `walk_hierarchy`/`walk_subtree`, also parent-before-child — but as a separate traversal call,
+  not composed into a general query.)
 - **Rich query term language:** `all`/`and`, `or`/`some`, `not`/`none`, and `pair` compose freely
   and mix with plain typeids in one query call — ODE_ECS's `View` now covers the same AND/OR/NOT
   shape (`includes`/`any_of`/`excludes`), but as three separate lists set at `view_init`/
   `refilter` time rather than terms composed ad hoc per call, and with no `pair`/wildcard
   equivalent.
-- **Observers on relation traits:** `on_add`/`on_remove` fire on any archetype transition,
-  including ones caused by `Exclusive`/`Cascade` relation side effects, not just plain
-  component add/remove.
+- **Observers that see relation-trait side effects:** odecs's `on_add`/`on_remove` fire on any
+  archetype transition, including ones caused by `Exclusive`/`Cascade` relation traits. Since
+  `Pair_Table` has no trait system, ODE_ECS's `Observer` `Pair_Added`/`Pair_Removed` events only
+  ever reflect direct `pair_add`/`pair_remove`/destroy-cascade calls, never trait-driven side
+  effects — there are none to see.
 - **Unlimited entity count and component-type count** — no capacity chosen up front for either.
 - **Automatic archetype migration for arbitrary component combinations:** any add/remove moves
   an entity to whichever archetype matches its new exact component set, creating that archetype
@@ -248,15 +282,16 @@ a single static archetype, not odecs's auto-migrating model — for entities who
 is assembled or mutated dynamically at the individual-component level, odecs's whole-database
 archetype migration is the only one of the two designs that represents the workload at all
 (README scenario 5). ODE_ECS stays a lean, fully-preallocated core with fixed capacities,
-immediate O(1) structural changes by default, and a deliberately minimal relations model, plus
-opt-in `Command_Buffer`/`pause_packing`/`Overbase`/`Arch_Table`/serialization for the cases that
-need them. odecs is a minimal *but dynamic* core inspired by Flecs: general typed relationships
-with wildcard queries and hierarchy iteration, a richer query term language, and automatic
-per-query deferred mutation — paid for with dynamically growing archetype storage and a very
-expensive entity-creation path (its variadic `add_entity` is the single biggest number
-separating the two libraries in the benchmarks — see README.md scenario 0/1). Pick ODE_ECS when
-you want fixed memory budgets and fast structural operations (spawning, despawning,
-re-parenting) at scale, reaching for `Arch_Table` on the component sets that are static per
-entity; pick odecs when you want Flecs-style general relationships, query expressiveness, and
-automatic migration across arbitrary/dynamic component combinations, and can afford (or avoid,
-by creating entities rarely) its archetype-churn and entity-creation costs.
+immediate O(1) structural changes by default, plus opt-in `Command_Buffer`/`pause_packing`/
+`Overbase`/`Arch_Table`/serialization/`Pair_Table`/`Observer` for the cases that need them —
+relations now cover both a minimal parent/child tree and typed many-to-many links, still without
+odecs's wildcard query matching or relation traits (`Exclusive`/`Cascade`). odecs is a minimal
+*but dynamic* core inspired by Flecs: wildcard relation queries, `Exclusive`/`Cascade` traits, a
+richer query term language, and automatic per-query deferred mutation — paid for with dynamically
+growing archetype storage and a very expensive entity-creation path (its variadic `add_entity` is
+the single biggest number separating the two libraries in the benchmarks — see README.md scenario
+0/1). Pick ODE_ECS when you want fixed memory budgets and fast structural operations (spawning,
+despawning, re-parenting, pairing) at scale, reaching for `Arch_Table` on the component sets that
+are static per entity; pick odecs when you want Flecs-style wildcard queries, relation traits, and
+automatic migration across arbitrary/dynamic component combinations, and can afford (or avoid, by
+creating entities rarely) its archetype-churn and entity-creation costs.
